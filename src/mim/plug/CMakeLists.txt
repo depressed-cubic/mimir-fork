@@ -9,6 +9,7 @@ set(MIM_PLUGINS
     cps
     demo
     gpu
+    layout
     ll
     ll_nvptx
     math

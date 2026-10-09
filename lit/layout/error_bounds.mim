@@ -1,0 +1,14 @@
+// RUN: (! %mim %s 2>&1) | %FileCheck %s
+//
+// An out-of-bounds coordinate must be rejected *at compile time* by the
+// `refly.check` inside `layout.checked_contains`.
+plugin layout;
+
+let shape = layout.IntTuple#nest (2, (layout.IntTuple#leaf 3, layout.IntTuple#leaf 4));
+// leaf 3 is not `< 3`, so `contains` folds to `ff`.
+let bad = layout.IntTuple#nest (2, (layout.IntTuple#leaf 3, layout.IntTuple#leaf 0));
+
+let _ = layout.checked_contains (shape, bad);
+
+// CHECK: error
+// CHECK: coordinate out of bounds for shape
