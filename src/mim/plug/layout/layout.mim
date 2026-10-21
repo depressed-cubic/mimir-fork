@@ -5,18 +5,21 @@
 /// A CuTe-style nested `IntTuple` — shapes, strides and coordinates — plus the
 /// index <-> coordinate conversions prototyped in `TypeSystem/Tuple.lean`.
 ///
-/// An `IntTuple` is either a `leaf a` (a single dimension of extent `a`, Lean's
-/// `Tuple.bot`) or a `nest (n, xs)` of `n` children (Lean's `Tuple.nest` /
-/// `Tuples.cons`). This is a faithful port of the Lean development: the same
-/// `size`, `compatible`, `contains`, `congruent`, `coord_to_idx` and
-/// `idx_to_coord` — here as axioms whose normalizers *partially evaluate* them.
+/// This is the **dependent-typing** version: the constraints are *types*, not
+/// `Bool`s.
 ///
-/// The normalizers fold whenever the constructors are known, even if the leaf
-/// extents are still symbolic, so `coord_to_idx`, `idx_to_coord` and `size`
-/// residualize to ordinary `core.nat` arithmetic (a stride/`div`/`mod` chain) —
-/// no structural matching survives to runtime. A fully dynamic `IntTuple` value
-/// (unknown constructors) simply stays stuck; a future `layout.lower` phase
-/// would expand that case to a recursive fallback.
+/// - `Coord shape` is the type of coordinates valid for `shape`: an `Idx` at
+///   every leaf, a tuple of sub-coordinates at every nest. An out-of-bounds
+///   coordinate is simply not a value of `Coord shape`.
+/// - a flat index into `shape` is a value of `Idx (size shape)`.
+/// - `Congruent a b` is a proposition (a type): unit `[]` when `a` and `b` nest
+///   identically, `⊥` when they do not; `Layout` carries such a proof, so a
+///   `Layout` value is congruent by construction.
+///
+/// `idx_to_coord` / `coord_to_idx` are total: their signatures *are* the bounds
+/// proof, so no `assert` is needed. The normalizers fold when the shape's
+/// constructors are known (even if the extents are symbolic), residualizing to
+/// `core.nat` arithmetic; a fully symbolic `IntTuple` stays stuck.
 ///
 /// [TOC]
 ///
@@ -29,130 +32,78 @@ plugin core;
 /// ### IntTuple
 ///
 /// A nested tuple of `Nat`s, mirroring Lean's mutually recursive `Tuple.bot` /
-/// `Tuple.nest` and `Tuples.nil` / `Tuples.cons`:
-///
-/// - `leaf a`: a dimension of extent `a` (`Tuple.bot`).
-/// - `nest xs`: a child list (`Tuple.nest`); `xs#0 = n` is the child count, `n = 0` and
-///   `n = 1` degenerate exactly as `«n; T»` does.
+/// `Tuple.nest` and `Tuples.nil` / `Tuples.cons`.
 ///
 pub rec IntTuple = | leaf: Nat | nest: IntTupleList
 and IntTupleList = [n: Nat, «n; IntTuple»];
 ///
-/// ### Layout
+/// ### Coord
 ///
-/// A shape and a stride whose nesting is congruent (Lean's `Layout.intro`).
+/// The coordinates valid for `shape`: `Coord (leaf n) = Idx n`, and
+/// `Coord (nest (n, xs))` is the `n`-tuple of `Coord (xs#i)`.
 ///
-pub let Layout = [shape: IntTuple, stride: IntTuple];
+axm Coord: IntTuple → *, normalize_coord_ty;
 ///
-/// ## Size and Rank
+/// ### size / rank
 ///
-/// ### size
-///
-/// The product of all leaves (Lean's `Tuple.size`).
+/// `size` is the product of all leaves; `rank` the number of top-level children.
 ///
 axm size: IntTuple → Nat, normalize_size;
-///
-/// ### rank
-///
-/// The number of top-level children; a leaf has rank `1` (Lean's `Tuple.rank`).
-///
 axm rank: IntTuple → Nat, normalize_rank;
-///
-/// ## Constraints
-///
-/// All three are `Bool`-valued (mimIR has no `Prop`); wrap one in `assert`
-/// (below) to turn it into a compile-time obligation — see `checked_contains`.
-///
-/// ### congruent
-///
-/// Same nesting structure, ignoring the extents (Lean's `Tuple.congruent`).
-///
-axm congruent: [IntTuple, IntTuple] → Bool, normalize_congruent;
-///
-/// ### contains
-///
-/// `coord` is a proper coordinate of `shape`: same nesting, every leaf strictly
-/// in bounds (Lean's `Tuple.contains`). This is the bounds check.
-///
-axm contains: [IntTuple, IntTuple] → Bool, normalize_contains;
-///
-/// ### compatible
-///
-/// Like `contains`, but a `leaf` coordinate may also be a *flat linear index*
-/// into a nested `shape` (Lean's `Tuple.compatible`).
-///
-axm compatible: [IntTuple, IntTuple] → Bool, normalize_compatible;
 ///
 /// ## Index <-> Coordinate
 ///
-/// ### coord_to_idx
-///
-/// Pulls a nested coordinate out to a flat index (Lean's `Tuple.coord_to_idx`).
-/// The first axis is the most minor: `idx = Σₖ cₖ · ∏_{j<k} sizeⱼ`.
-///
-axm coord_to_idx: [shape: IntTuple, coord: IntTuple] → Nat, normalize_coord_to_idx;
-///
 /// ### idx_to_coord
 ///
-/// Pushes a flat index into the nested coordinate of `shape` (Lean's
-/// `Tuple.idx_to_coord`), the inverse of `coord_to_idx`.
+/// Pushes a flat, in-bounds index `x: Idx (size shape)` into `Coord shape`.
 ///
-axm idx_to_coord: [shape: IntTuple, idx: Nat] → IntTuple, normalize_idx_to_coord;
+axm idx_to_coord: [shape: IntTuple, x: Idx (size shape)] → Coord shape, normalize_idx_to_coord;
 ///
-/// ### at
+/// ### coord_to_idx
 ///
-/// `idx_to_coord` with the bound carried in the type: `x: Idx (size shape)` is a
-/// flat index in range *by construction*. A consumer can rely on it without an
-/// `assert`, which is what makes this usable when `shape` is still symbolic — the
-/// invariant travels in the signature instead of being re-checked.
+/// Pulls a bounded coordinate out to its flat index (the inverse).
 ///
-axm at: [shape: IntTuple, x: Idx (size shape)] → IntTuple, normalize_at;
+axm coord_to_idx: [shape: IntTuple, c: Coord shape] → Idx (size shape), normalize_coord_to_idx;
 ///
-/// ## Checked Constructors
+/// ### erase
 ///
-/// ### assert
+/// Forgets the bounds, yielding the plain `IntTuple` — interop with the
+/// unrefined world.
 ///
-/// `assert (cond, val, msg)` yields `val` when `cond` folds to `tt`, bails with a
-/// hard compile-time error when it folds to `ff`, and stays stuck when symbolic.
-/// This is `refly.check`, but fatal rather than merely logged.
+axm erase: [shape: IntTuple, c: Coord shape] → IntTuple, normalize_erase;
 ///
-axm assert: {T: *} → {n: Nat} → [Bool, T, «n; I8»] → T, normalize_assert;
+/// ## Layout
 ///
-/// ### bounded
+/// ### Congruent
 ///
-/// Produces the singleton proof `«compatible (shape, leaf x)»`. It bails when `x`
-/// is out of bounds and stays stuck while `shape` is symbolic. Thread its result
-/// through your own signatures to hand the invariant to consumers — the singleton
-/// is a type, so a consumer that demands `«compatible …»` can only be called with
-/// a proof, not an arbitrary `‹ff›`.
+/// A proposition (type): `[]` (unit) iff `a` and `b` nest identically, `⊥`
+/// (empty) otherwise.
 ///
-axm bounded: [shape: IntTuple, x: Nat] → «compatible (shape, IntTuple#leaf x)», normalize_bounded;
+axm Congruent: [IntTuple, IntTuple] → *, normalize_congruent_ty;
 ///
-/// ### at_bounded
+/// ### mk_congruent
 ///
-/// The witness-consuming accessor: `pf` proves `x` in bounds, so no runtime check
-/// is needed. Call it as `at_bounded (shape, x, bounded (shape, x))`.
+/// The canonical inhabitant of `Congruent (a, b)`: `()` when unit, a tuple of
+/// sub-proofs for a nest. Bails on `⊥`; stuck while the shapes are symbolic.
 ///
-anx lam at_bounded (shape: IntTuple, x: Nat, pf: «compatible (shape, IntTuple#leaf x)»): IntTuple =
-    idx_to_coord (shape, x);
+axm mk_congruent: [a: IntTuple, b: IntTuple] → Congruent (a, b), normalize_mk_congruent;
 ///
-/// ### checked_contains
+/// ### Layout
 ///
-/// Returns `coord`, failing compilation unless `contains (shape, coord)`.
+/// A shape, a stride, and a proof that they are congruent: every `Layout` value
+/// is congruent by construction (the proof is erased at codegen).
 ///
-anx lam checked_contains (shape coord: IntTuple): IntTuple =
-    assert (contains (shape, coord), coord, "coordinate out of bounds for shape");
-///
-/// ### checked_idx
-///
-/// Returns `idx`, failing compilation unless `idx` is a valid flat index of `shape`.
-///
-anx lam checked_idx (shape: IntTuple, idx: Nat): Nat =
-    assert (compatible (shape, IntTuple#leaf idx), idx, "index out of bounds for shape");
+pub let Layout = [shape: IntTuple, stride: IntTuple, pf: Congruent (shape, stride)];
 ///
 /// ### make_layout
 ///
-/// Builds a `Layout`, failing compilation unless shape and stride are congruent.
+/// Builds a `Layout`, discharging the congruence obligation with `mk_congruent`.
 ///
-anx lam make_layout (shape stride: IntTuple): Layout =
-    assert (congruent (shape, stride), (shape, stride), "shape and stride are not congruent");
+anx lam make_layout (shape stride: IntTuple): Layout = (shape, stride, mk_congruent (shape, stride));
+///
+/// ### crd2idx
+///
+/// The layout's semantics: the memory index of coordinate `c` under `l`,
+/// `Σ cᵢ · strideᵢ` (nested inner product).
+///
+axm crd2idx: [l: Layout, c: Coord (l#shape)] → Nat, normalize_crd2idx;

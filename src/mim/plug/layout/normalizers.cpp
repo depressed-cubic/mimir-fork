@@ -1,5 +1,4 @@
 #include <optional>
-#include <string>
 #include <utility>
 
 #include <mim/axm.h>
@@ -62,134 +61,132 @@ const Def* size_of(World& w, const View& v) {
     return res;
 }
 
-/// Same nesting, ignoring extents; `std::nullopt` if either side is dynamic.
-std::optional<bool> congruent_of(const View& a, const View& b) {
-    if (a.is_leaf != b.is_leaf) return false;
-    if (a.is_leaf) return true;
-    if (a.kids.size() != b.kids.size()) return false;
+/// `Coord shape` as a type: `Idx` at a leaf, a product of `Coord` at a nest.
+const Def* coord_ty(World& w, const View& v) {
+    if (v.is_leaf) return w.type_idx(v.val);
 
-    for (size_t i = 0; i != a.kids.size(); ++i) {
-        auto ka = view(a.kids[i]);
-        auto kb = view(b.kids[i]);
-        if (!ka || !kb) return {};
-        auto c = congruent_of(*ka, *kb);
-        if (!c) return {};
-        if (!*c) return false;
-    }
-    return true;
+    DefVec tys;
+    tys.reserve(v.kids.size());
+    for (auto k : v.kids) tys.push_back(w.app(w.annex<Coord>(), k));
+    return w.sigma(tys);
 }
 
-/// The bounds predicate as a `Bool` Def, folded on literals and residualized otherwise.
-const Def* build_contains(World& w, const View& shape, const View& coord) {
-    if (shape.is_leaf != coord.is_leaf) return w.lit_ff();
-    if (shape.is_leaf) return w.call(core::ncmp::l, Defs{coord.val, shape.val});
-    if (shape.kids.size() != coord.kids.size()) return w.lit_ff();
+/// Pushes a *Nat* index `xn` into `Coord shape`.
+const Def* build_coord(World& w, const View& v, const Def* xn) {
+    if (v.is_leaf) return w.call<core::idx>(w.lit_nat(0), v.val, xn);
 
-    const Def* res = w.lit_tt();
-    for (size_t i = 0; i != shape.kids.size(); ++i) {
-        auto ks = view(shape.kids[i]);
-        auto kc = view(coord.kids[i]);
-        if (!ks || !kc) return nullptr;
-        auto c = build_contains(w, *ks, *kc);
+    DefVec kids;
+    const Def* prefix = w.lit_nat(1);
+    for (auto k : v.kids) {
+        auto kv = view(k);
+        if (!kv) return nullptr;
+        auto sz = size_of(w, *kv);
+        if (!sz) return nullptr;
+        auto q = w.call(core::nat::div, Defs{xn, prefix});
+        auto r = w.call(core::nat::rem, Defs{q, sz});
+        auto c = build_coord(w, *kv, r);
         if (!c) return nullptr;
-        res = w.call(core::bit2::and_, w.lit_nat(0), Defs{res, c});
+        kids.push_back(c);
+        prefix = w.call(core::nat::mul, Defs{prefix, sz});
     }
-    return res;
+    return w.tuple(kids);
 }
 
-/// Like `build_contains`, but a `leaf` coord may be a flat index into a nested shape.
-const Def* build_compatible(World& w, const View& shape, const View& coord) {
-    if (shape.is_leaf && coord.is_leaf) return w.call(core::ncmp::l, Defs{coord.val, shape.val});
-    if (!shape.is_leaf && coord.is_leaf) {
-        auto s = size_of(w, shape);
-        if (!s) return nullptr;
-        return w.call(core::ncmp::l, Defs{coord.val, s});
-    }
-    if (shape.is_leaf && !coord.is_leaf) return w.lit_ff();
-    if (shape.kids.size() != coord.kids.size()) return w.lit_ff();
-
-    const Def* res = w.lit_tt();
-    for (size_t i = 0; i != shape.kids.size(); ++i) {
-        auto ks = view(shape.kids[i]);
-        auto kc = view(coord.kids[i]);
-        if (!ks || !kc) return nullptr;
-        auto c = build_compatible(w, *ks, *kc);
-        if (!c) return nullptr;
-        res = w.call(core::bit2::and_, w.lit_nat(0), Defs{res, c});
-    }
-    return res;
-}
-
-/// `idx = idx₀ + size₀·(idx₁ + size₁·(…))` — the first axis is the most minor.
-const Def* build_coord_to_idx(World& w, const View& shape, const View& coord) {
-    if (shape.is_leaf != coord.is_leaf) return nullptr;
-    if (shape.is_leaf) return coord.val;
-    if (shape.kids.size() != coord.kids.size()) return nullptr;
+/// Pulls a `Coord shape` out to a *Nat* index (first axis most minor).
+const Def* coord_to_idx_nat(World& w, const View& v, const Def* c) {
+    if (v.is_leaf) return w.call<core::bitcast>(w.type_nat(), c);
 
     const Def* res = w.lit_nat(0);
-    for (size_t i = shape.kids.size(); i-- != 0;) {
-        auto ks = view(shape.kids[i]);
-        auto kc = view(coord.kids[i]);
-        if (!ks || !kc) return nullptr;
-        auto idx = build_coord_to_idx(w, *ks, *kc);
+    for (size_t i = v.kids.size(); i-- != 0;) {
+        auto kv = view(v.kids[i]);
+        if (!kv) return nullptr;
+        auto idx = coord_to_idx_nat(w, *kv, c->proj(v.kids.size(), i));
         if (!idx) return nullptr;
-        auto sz = size_of(w, *ks);
+        auto sz = size_of(w, *kv);
         if (!sz) return nullptr;
         res = w.call(core::nat::add, Defs{idx, w.call(core::nat::mul, Defs{sz, res})});
     }
     return res;
 }
 
-/// `nest (n, kids)`; the child list degenerates for 0/1 exactly as `«n; T»` does.
-const Def* nest(World& w, const Def* it, const DefVec& kids) {
+/// Forgets the bounds of `c: Coord shape`, yielding an `IntTuple`.
+const Def* erase_rec(World& w, const Def* it, const View& v, const Def* c) {
+    if (v.is_leaf) return w.inj(it, 0, w.call<core::bitcast>(w.type_nat(), c));
+
+    DefVec kids;
+    for (size_t i = 0; i != v.kids.size(); ++i) {
+        auto kv = view(v.kids[i]);
+        if (!kv) return nullptr;
+        auto e = erase_rec(w, it, *kv, c->proj(v.kids.size(), i));
+        if (!e) return nullptr;
+        kids.push_back(e);
+    }
     return w.inj(it, 1, w.tuple({w.lit_nat(kids.size()), w.tuple(kids)}));
 }
 
-/// Pushes a (possibly already nested) index into `shape`; mirrors `Tuple.idx_to_coord`.
-const Def* build_idx_to_coord(World& w, const Def* it, const View& shape, const View& idx) {
-    if (shape.is_leaf) {
-        if (!idx.is_leaf) return nullptr; // a `nest` index has no place in a `leaf` shape
-        return w.inj(it, 0, idx.val);
+/// `Congruent a b` as a type: `[]` (unit) when congruent, `⊥` when not.
+const Def* congruent_ty(World& w, const View& a, const View& b) {
+    if (a.is_leaf != b.is_leaf) return w.type_bot();
+    if (a.is_leaf) return w.sigma();
+    if (a.kids.size() != b.kids.size()) return w.type_bot();
+
+    DefVec tys;
+    for (size_t i = 0; i != a.kids.size(); ++i) {
+        auto ka = view(a.kids[i]);
+        auto kb = view(b.kids[i]);
+        if (!ka || !kb) return nullptr;
+        auto t = congruent_ty(w, *ka, *kb);
+        if (!t) return nullptr;
+        if (t == w.type_bot()) return t;
+        tys.push_back(t);
+    }
+    return w.sigma(tys);
+}
+
+/// The canonical inhabitant of `Congruent a b`; `nullptr` for a non-congruent/`⊥` side.
+const Def* mk_congruent_rec(World& w, const View& a, const View& b) {
+    if (a.is_leaf != b.is_leaf) return nullptr;
+    if (a.is_leaf) return w.tuple();
+    if (a.kids.size() != b.kids.size()) return nullptr;
+
+    DefVec pfs;
+    for (size_t i = 0; i != a.kids.size(); ++i) {
+        auto ka = view(a.kids[i]);
+        auto kb = view(b.kids[i]);
+        if (!ka || !kb) return nullptr;
+        auto p = mk_congruent_rec(w, *ka, *kb);
+        if (!p) return nullptr;
+        pfs.push_back(p);
+    }
+    return w.tuple(pfs);
+}
+
+/// The nested inner product `Σ cᵢ · strideᵢ`.
+const Def* crd2idx_rec(World& w, const View& sh, const View& st, const Def* c) {
+    if (sh.is_leaf) {
+        auto cv = w.call<core::bitcast>(w.type_nat(), c);
+        return w.call(core::nat::mul, Defs{cv, st.val});
     }
 
-    if (idx.is_leaf) { // flat index: delinearize, first axis most minor
-        DefVec kids;
-        const Def* prefix = w.lit_nat(1);
-        for (auto k : shape.kids) {
-            auto ks = view(k);
-            if (!ks) return nullptr;
-            auto sz = size_of(w, *ks);
-            if (!sz) return nullptr;
-            auto q = w.call(core::nat::div, Defs{idx.val, prefix});
-            auto r = w.call(core::nat::rem, Defs{q, sz});
-            auto c = build_idx_to_coord(w, it, *ks, View::leaf(r));
-            if (!c) return nullptr;
-            kids.push_back(c);
-            prefix = w.call(core::nat::mul, Defs{prefix, sz});
-        }
-        return nest(w, it, kids);
+    const Def* res = w.lit_nat(0);
+    for (size_t i = 0; i != sh.kids.size(); ++i) {
+        auto ksh = view(sh.kids[i]);
+        auto kst = view(st.kids[i]);
+        if (!ksh || !kst) return nullptr;
+        auto t = crd2idx_rec(w, *ksh, *kst, c->proj(sh.kids.size(), i));
+        if (!t) return nullptr;
+        res = w.call(core::nat::add, Defs{res, t});
     }
-
-    if (shape.kids.size() != idx.kids.size()) return nullptr; // pointwise
-    DefVec kids;
-    for (size_t i = 0; i != shape.kids.size(); ++i) {
-        auto ks = view(shape.kids[i]);
-        auto ki = view(idx.kids[i]);
-        if (!ks || !ki) return nullptr;
-        auto c = build_idx_to_coord(w, it, *ks, *ki);
-        if (!c) return nullptr;
-        kids.push_back(c);
-    }
-    return nest(w, it, kids);
+    return res;
 }
 
 } // namespace
 
-const Def* normalize_rank(const Def* type, const Def*, const Def* arg) {
+const Def* normalize_coord_ty(const Def* type, const Def*, const Def* arg) {
     auto& w = type->world();
     auto v  = view(arg);
     if (!v) return {};
-    return v->is_leaf ? w.lit_nat(1) : v->val;
+    return coord_ty(w, *v);
 }
 
 const Def* normalize_size(const Def* type, const Def*, const Def* arg) {
@@ -199,88 +196,71 @@ const Def* normalize_size(const Def* type, const Def*, const Def* arg) {
     return size_of(w, *v);
 }
 
-const Def* normalize_congruent(const Def* type, const Def*, const Def* arg) {
-    auto& w     = type->world();
-    auto [a, b] = arg->projs<2>();
-    auto va     = view(a);
-    auto vb     = view(b);
-    if (!va || !vb) return {};
-    auto res = congruent_of(*va, *vb);
-    if (!res) return {};
-    return w.lit_bool(*res);
-}
-
-const Def* normalize_contains(const Def* type, const Def*, const Def* arg) {
-    auto& w     = type->world();
-    auto [a, b] = arg->projs<2>();
-    auto va     = view(a);
-    auto vb     = view(b);
-    if (!va || !vb) return {};
-    return build_contains(w, *va, *vb);
-}
-
-const Def* normalize_compatible(const Def* type, const Def*, const Def* arg) {
-    auto& w     = type->world();
-    auto [a, b] = arg->projs<2>();
-    auto va     = view(a);
-    auto vb     = view(b);
-    if (!va || !vb) return {};
-    return build_compatible(w, *va, *vb);
-}
-
-const Def* normalize_coord_to_idx(const Def* type, const Def*, const Def* arg) {
-    auto& w          = type->world();
-    auto [shape, co] = arg->projs<2>();
-    auto vs          = view(shape);
-    auto vc          = view(co);
-    if (!vs || !vc) return {};
-    return build_coord_to_idx(w, *vs, *vc);
+const Def* normalize_rank(const Def* type, const Def*, const Def* arg) {
+    auto& w = type->world();
+    auto v  = view(arg);
+    if (!v) return {};
+    return v->is_leaf ? w.lit_nat(1) : v->val;
 }
 
 const Def* normalize_idx_to_coord(const Def* type, const Def*, const Def* arg) {
     auto& w         = type->world();
     auto [shape, x] = arg->projs<2>();
-    auto vs         = view(shape);
-    if (!vs) return {};
-    return build_idx_to_coord(w, shape->type(), *vs, View::leaf(x));
+    auto v          = view(shape);
+    if (!v) return {};
+    auto xn = w.call<core::bitcast>(w.type_nat(), x);
+    return build_coord(w, *v, xn);
 }
 
-/// `at (shape, x)` with `x: Idx (size shape)`; the bound is in the type, so no check is needed.
-const Def* normalize_at(const Def* type, const Def*, const Def* arg) {
+const Def* normalize_coord_to_idx(const Def* type, const Def*, const Def* arg) {
+    auto& w          = type->world();
+    auto [shape, c]  = arg->projs<2>();
+    auto v           = view(shape);
+    if (!v) return {};
+    auto nat = coord_to_idx_nat(w, *v, c);
+    if (!nat) return {};
+    auto sz = size_of(w, *v);
+    if (!sz) return {};
+    return w.call<core::idx>(w.lit_nat(0), sz, nat);
+}
+
+const Def* normalize_erase(const Def* type, const Def*, const Def* arg) {
     auto& w         = type->world();
-    auto [shape, x] = arg->projs<2>();
-    auto vs         = view(shape);
-    if (!vs) return {};
-    auto nat = w.call<core::bitcast>(w.type_nat(), x);
-    return build_idx_to_coord(w, shape->type(), *vs, View::leaf(nat));
+    auto [shape, c] = arg->projs<2>();
+    auto v          = view(shape);
+    if (!v) return {};
+    return erase_rec(w, shape->type(), *v, c);
 }
 
-/// `assert (cond, val, msg)`: `val` on `tt`, a hard compile-time error on `ff`, stuck otherwise.
-const Def* normalize_assert(const Def* type, const Def*, const Def* arg) {
-    auto& w               = type->world();
-    auto [cond, val, msg] = arg->projs<3>();
-
-    if (cond == w.lit_tt()) return val;
-    if (cond == w.lit_ff()) {
-        auto s = tuple2str(msg);
-        if (s.empty()) s = "layout constraint failed";
-        val->blame("{}", s).bail();
-    }
-    return {};
+const Def* normalize_congruent_ty(const Def* type, const Def*, const Def* arg) {
+    auto& w     = type->world();
+    auto [a, b] = arg->projs<2>();
+    auto va     = view(a);
+    auto vb     = view(b);
+    if (!va || !vb) return {};
+    return congruent_ty(w, *va, *vb);
 }
 
-/// `bounded (shape, x)`: the singleton proof `«compatible (shape, leaf x)»`.
-const Def* normalize_bounded(const Def* type, const Def*, const Def* arg) {
+const Def* normalize_mk_congruent(const Def* type, const Def*, const Def* arg) {
+    auto& w     = type->world();
+    auto [a, b] = arg->projs<2>();
+    auto va     = view(a);
+    auto vb     = view(b);
+    if (!va || !vb) return {};
+
+    auto ty = congruent_ty(w, *va, *vb);
+    if (!ty) return {};
+    if (ty == w.type_bot()) a->blame("shape and stride are not congruent").bail();
+    return mk_congruent_rec(w, *va, *vb);
+}
+
+const Def* normalize_crd2idx(const Def* type, const Def*, const Def* arg) {
     auto& w         = type->world();
-    auto [shape, x] = arg->projs<2>();
-    auto vs         = view(shape);
-    if (!vs) return {};
-
-    auto pred = build_compatible(w, *vs, View::leaf(x));
-    if (!pred) return {};
-    if (pred == w.lit_ff()) x->blame("index out of bounds for shape").bail();
-    if (pred == w.lit_tt()) return w.wrap(w.lit_tt());
-    return {};
+    auto [l, c]     = arg->projs<2>();
+    auto vsh        = view(l->proj(3, 0));
+    auto vst        = view(l->proj(3, 1));
+    if (!vsh || !vst) return {};
+    return crd2idx_rec(w, *vsh, *vst, c);
 }
 
 MIM_layout_NORMALIZER_IMPL

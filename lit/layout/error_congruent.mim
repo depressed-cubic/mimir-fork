@@ -1,0 +1,15 @@
+// RUN: (! %mim %s 2>&1) | %FileCheck %s
+//
+// Congruence is a proof obligation: a `Layout` whose shape and stride nest
+// differently cannot be built.
+plugin layout;
+plugin core;
+
+lam it2 (a b: Nat): layout.IntTuple =
+    layout.IntTuple#nest (2, (layout.IntTuple#leaf a, layout.IntTuple#leaf b));
+lam it3n (a b: Nat) (c: layout.IntTuple): layout.IntTuple =
+    layout.IntTuple#nest (3, (layout.IntTuple#leaf a, layout.IntTuple#leaf b, c));
+
+let bad = layout.make_layout (it2 (2, 3), it3n (2, 3) (it2 (4, 5)));
+
+// CHECK: error: shape and stride are not congruent

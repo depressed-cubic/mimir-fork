@@ -1,6 +1,7 @@
 // RUN: %mim %s
 //
-// The Lean `#eval` vectors of `TypeSystem/Tuple.lean`, checked structurally:
+// The Lean `#eval` vectors of `TypeSystem/Tuple.lean`, now with the bounds and
+// congruence carried as *types*:
 //   #t[2, 3, #t[4, 5]]  is a size-120 shape,
 //   #t[1, 2, #t[3, 4]]  is the coordinate of flat index 119,
 //   coord_to_idx / idx_to_coord are inverse.
@@ -9,41 +10,26 @@ plugin layout;
 plugin core;
 plugin refly;
 
-// The `IntTuple` constructors are verbose; a little sugar.
 lam it2 (a b: Nat): layout.IntTuple =
     layout.IntTuple#nest (2, (layout.IntTuple#leaf a, layout.IntTuple#leaf b));
 lam it3n (a b: Nat) (c: layout.IntTuple): layout.IntTuple =
     layout.IntTuple#nest (3, (layout.IntTuple#leaf a, layout.IntTuple#leaf b, c));
 
-let shape = it3n (2, 3) (it2 (4, 5));   // #t[2, 3, #t[4, 5]]
-let coord = it3n (1, 2) (it2 (3, 4));   // #t[1, 2, #t[3, 4]]
-let other = it3n (5, 6) (it2 (7, 8));   // #t[5, 6, #t[7, 8]]
+let shape = it3n (2, 3) (it2 (4, 5)); // #t[2, 3, #t[4, 5]]
 
 // size / rank
 let _ = refly.struc.e (layout.size shape, 120);
 let _ = refly.struc.e (layout.rank shape, 3);
 
-// congruent: same nesting, different extents
-let _ = refly.struc.e (layout.congruent (shape, other), tt);
-let _ = refly.struc.e (layout.congruent (shape, it2 (2, 3)), ff);
+// idx_to_coord / coord_to_idx are inverse, and the coordinate is a nested tuple
+// of *bounded* indices (`Idx`).
+let c = layout.idx_to_coord (shape, 119₁₂₀);
+let _ = refly.struc.e (layout.coord_to_idx (shape, c), 119₁₂₀);
+let _ = refly.struc.e (c, (1₂, 2₃, (3₄, 4₅)));
 
-// contains: the coordinate is in bounds
-let _ = refly.struc.e (layout.contains (shape, coord), tt);
-let _ = refly.struc.e (layout.contains (shape, it3n (2, 0) (it2 (0, 0))), ff); // 2 ≮ 2
+// erase forgets the bounds
+let _ = refly.struc.e (layout.erase (shape, c), it3n (1, 2) (it2 (3, 4)));
 
-// compatible: a flat index is compatible too
-let _ = refly.struc.e (layout.compatible (shape, layout.IntTuple#leaf 119), tt);
-let _ = refly.struc.e (layout.compatible (shape, layout.IntTuple#leaf 120), ff);
-
-// coord_to_idx / idx_to_coord
-let _ = refly.struc.e (layout.coord_to_idx (shape, coord), 119);
-let _ = refly.struc.e (layout.idx_to_coord (shape, 119), coord);
-
-// the checked constructor accepts a valid coordinate
-let _ = refly.struc.e (layout.checked_contains (shape, coord), coord);
-let _ = refly.struc.e (layout.checked_idx (shape, 119), 119);
-let _ = refly.struc.e (layout.make_layout (shape, other), (shape, other));
-
-// invariant-carrying accessors: the bound travels in the type / as a witness
-let _ = refly.struc.e (layout.at (shape, core.idx 0 120 119), coord);
-let _ = refly.struc.e (layout.at_bounded (shape, 119, layout.bounded (shape, 119)), coord);
+// a Layout carries a congruence proof; crd2idx is the nested inner product
+let l = layout.make_layout (it2 (2, 3), it2 (3, 1)); // row-major (2,3): strides (3,1)
+let _ = refly.struc.e (layout.crd2idx (l, (1₂, 2₃)), 5);

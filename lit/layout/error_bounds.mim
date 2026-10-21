@@ -1,14 +1,16 @@
 // RUN: (! %mim %s 2>&1) | %FileCheck %s
 //
-// An out-of-bounds coordinate must be rejected *at compile time* by the
-// `refly.check` inside `layout.checked_contains`.
+// The bound is a *type*: a plain `Nat` where `Idx (size shape)` is expected is a
+// compile-time error, with no runtime check involved.
 plugin layout;
+plugin core;
 
-let shape = layout.IntTuple#nest (2, (layout.IntTuple#leaf 3, layout.IntTuple#leaf 4));
-// leaf 3 is not `< 3`, so `contains` folds to `ff`.
-let bad = layout.IntTuple#nest (2, (layout.IntTuple#leaf 3, layout.IntTuple#leaf 0));
+lam it2 (a b: Nat): layout.IntTuple =
+    layout.IntTuple#nest (2, (layout.IntTuple#leaf a, layout.IntTuple#leaf b));
 
-let _ = layout.checked_contains (shape, bad);
+let shape = it2 (2, 3); // size 6
 
-// CHECK: error
-// CHECK: coordinate out of bounds for shape
+extern lam bad (): layout.Coord shape = layout.idx_to_coord (shape, 5);
+
+// CHECK: error: argument is not assignable to callee's domain
+// CHECK: expected `[shape: IntTuple, x: Idx (layout.size shape)]`, got `[IntTuple, Nat]`

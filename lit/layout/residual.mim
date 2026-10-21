@@ -1,26 +1,18 @@
 // RUN: %mim %s -o - | %FileCheck %s
 //
-// Partial evaluation: with a *statically known structure* but symbolic extents,
-// the shape constructors vanish and only `core.nat` arithmetic remains.
+// Partial evaluation: with a statically known structure but symbolic extents,
+// `idx_to_coord` residualizes to `core.nat` arithmetic (no `layout.*` remains).
 plugin layout;
+plugin core;
 
-// size [#m, #n] = m · n
-extern lam size_sym (m n: Nat): Nat =
-    layout.size (layout.IntTuple#nest (2, (layout.IntTuple#leaf m, layout.IntTuple#leaf n)));
+lam sh (m n: Nat): layout.IntTuple =
+    layout.IntTuple#nest (2, (layout.IntTuple#leaf m, layout.IntTuple#leaf n));
 
-// coord_to_idx [#m, #n] (#i, #j) = i + m · j
-extern lam idx_sym (m n i j: Nat): Nat =
-    layout.coord_to_idx (layout.IntTuple#nest (2, (layout.IntTuple#leaf m, layout.IntTuple#leaf n)),
-                         layout.IntTuple#nest (2, (layout.IntTuple#leaf i, layout.IntTuple#leaf j)));
+// Coord (sh (m, n)) = [Idx m, Idx n]; the value is (x mod m, (x / m) mod n).
+extern lam crd (m n: Nat, x: Idx (layout.size (sh (m, n)))): layout.Coord (sh (m, n)) =
+    layout.idx_to_coord (sh (m, n), x);
 
-// idx_to_coord [#m, #n] x = (#(x mod m), #((x / m) mod n))
-extern lam crd_sym (m n x: Nat): layout.IntTuple =
-    layout.idx_to_coord (layout.IntTuple#nest (2, (layout.IntTuple#leaf m, layout.IntTuple#leaf n)), x);
-
-// Only the arithmetic survives - no `layout.size` / `coord_to_idx` / `idx_to_coord` App,
-// and no `IntTuple` constructor, reaches the output.
 // CHECK-DAG: core.nat.mul
-// CHECK-DAG: core.nat.add
 // CHECK-DAG: core.nat.div
 // CHECK-DAG: core.nat.rem
 // CHECK-NOT: layout.
